@@ -82,12 +82,12 @@ ports:
 
 command:
 - ko-app/k8s-ondemand-proxy
-- -upstream=$UPSTREAM
-- -namespace=$NAMESPACE
-- -resource-name=$RESOURCE_NAME
-- -listen=$LISTEN_ADDR
-- -idle-timeout=$IDLE_TIMEOUT
-- -replicas=$REPLICAS
+- -upstream=$(UPSTREAM)
+- -namespace=$(NAMESPACE)
+- -resource-name=$(RESOURCE_NAME)
+- -listen=$(LISTEN_ADDR)
+- -idle-timeout=$(IDLE_TIMEOUT)
+- -replicas=$(REPLICAS)
 
 resources:
   requests:
@@ -98,7 +98,7 @@ resources:
 env:
   GOMAXPROCS: "2"
   UPSTREAM: 127.0.0.1:6000
-  RESOUCE_NAME: statefulset/app
+  RESOURCE_NAME: statefulset/app
   LISTEN_ADDR: ":1001"
   IDLE_TIMEOUT: 15m
   REPLICAS: "1"
