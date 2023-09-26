@@ -85,6 +85,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 		slog.Error(err.Error())
 		return
 	}
+
 	state.touch()
 	// Must be some sort of locking, or sync.Cond, but I too lazy.
 	for state.readyPods.Load() == 0 {
@@ -94,6 +95,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 	serverConn, err := net.DialTCP("tcp", nil, state.upsreamSrv)
 	if err != nil {
 		slog.Error(err.Error())
+		clientConn.Close()
 		return
 	}
 	serverConn.SetKeepAlive(true)
@@ -145,9 +147,9 @@ func (state *globalState) readyPodsUpdater() {
 func (state *globalState) podsScaler(timeout time.Duration, replicas int32) {
 	for {
 		now := time.Now().Unix()
-		timeout_sec := int64(timeout.Seconds())
+		timeoutSec := int64(timeout.Seconds())
 		lastAccess := state.lastServe.Load()
-		if (lastAccess + timeout_sec) < now {
+		if (lastAccess + timeoutSec) < now {
 			state.updateScale(0)
 		} else {
 			state.updateScale(replicas)
@@ -158,11 +160,13 @@ func (state *globalState) podsScaler(timeout time.Duration, replicas int32) {
 
 func (state *globalState) updateScale(replicas int32) {
 	client := state.client
+	slog.Info("Trigger scale", "name", state.name, "replicas", replicas, "group", state.group, "namespace", state.namespace)
 	switch state.group {
 	case "statefulset", "sts":
 		statefulSetClient := client.AppsV1().StatefulSets(state.namespace)
 		scale, err := statefulSetClient.GetScale(context.TODO(), state.name, metav1.GetOptions{})
 		if err != nil {
+			slog.Error(err.Error())
 			return
 		}
 		scale.Spec.Replicas = replicas
@@ -175,6 +179,7 @@ func (state *globalState) updateScale(replicas int32) {
 		deploymentClient := client.AppsV1().Deployments(state.namespace)
 		scale, err := deploymentClient.GetScale(context.TODO(), state.name, metav1.GetOptions{})
 		if err != nil {
+			slog.Error(err.Error())
 			return
 		}
 		scale.Spec.Replicas = replicas
