@@ -20,6 +20,7 @@ import (
 
 type globalState struct {
 	lastServe atomic.Int64
+	upsreamSrv *net.TCPAddr
 }
 
 func (state *globalState) touch() {
@@ -70,15 +71,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 	}
 	state.touch()
 
-
-
-	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
-	if err != nil {
-		slog.Error("failed to resolve address %s: %w", "127.0.0.1:6000", err.Error())
-		return
-	}
-
-    serverConn, err := net.DialTCP("tcp", nil, addr)
+    serverConn, err := net.DialTCP("tcp", nil, state.upsreamSrv)
     if err != nil {
         slog.Error(err.Error())
         return
@@ -91,30 +84,16 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 
 func main() {
 	var kubeconfig string
-	var leaseLockName string
-	var leaseLockNamespace string
+	var rawUpstreamServerAddr string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
-	flag.StringVar(&leaseLockName, "lease-lock-name", "", "the lease lock resource name")
-	flag.StringVar(&leaseLockNamespace, "lease-lock-namespace", "", "the lease lock resource namespace")
+	flag.StringVar(&rawUpstreamServerAddr, "upstream", "", "Remote server address like dind.ci.svc.cluster.local:2375")
 	flag.Parse()
 
 	programLevel := new(slog.LevelVar)
 	logger := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel})
 	slog.SetDefault(slog.New(logger))
 
-	if leaseLockName == "" {
-		slog.Error("unable to get lease lock resource name (missing lease-lock-name flag).")
-	}
-	if leaseLockNamespace == "" {
-		slog.Error("unable to get lease lock resource namespace (missing lease-lock-namespace flag).")
-	}
-
-	// leader election uses the Kubernetes API by writing to a
-	// lock object, which can be a LeaseLock object (preferred),
-	// a ConfigMap, or an Endpoints (deprecated) object.
-	// Conflicting writes are detected and each client handles those actions
-	// independently.
 	config, err := buildConfig(kubeconfig)
 	if err != nil {
 		slog.Error(err.Error())
@@ -125,6 +104,11 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	state := globalState{}
+	state.upsreamSrv, err = net.ResolveTCPAddr("tcp", rawUpstreamServerAddr)
+	if err != nil {
+		slog.Error("failed to resolve address", rawUpstreamServerAddr, err.Error())
+		return
+	}
 
 	srvInstance := tcpserver.Server{}
 	err = srvInstance.ListenAndServe(":11211", state.connectionHandler)
