@@ -20,4 +20,4 @@ jobs:
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - uses: ko-build/setup-ko@v0.6
-      - run: ko build
+      - run: ko build --bare --platform=linux/arm64,linux/amd64 -t latest -t ${{ github.sha }}
