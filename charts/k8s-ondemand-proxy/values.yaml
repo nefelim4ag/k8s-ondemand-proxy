@@ -1,0 +1,193 @@
+image:
+  repository: ghcr.io/nefelim4ag/k8s-ondemand-proxy
+  tag: latest
+  pullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 85
+  behavior:
+    scaleDown:
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 30
+
+## @param strategy [object] Strategy to use to update Pods
+## ref: https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#update-strategies
+##
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 5%
+    maxUnavailable: 10%
+
+service:
+  annotations: {}
+  type: ClusterIP
+  clusterIP: {}
+  ports:
+    - name: tcp
+      protocol: TCP
+      port: 1001
+      targetPort: tcp
+
+## @param livenessProbe
+## Will restart pod on liveness fail
+livenessProbe:
+  null
+  # httpGet:
+  #   path: /
+  #   port: http
+
+## @param readinessProbe
+## Will stop route requests to pod on fail
+readinessProbe:
+  null
+  # httpGet:
+  #   path: /
+  #   port: http
+
+## @param startupProbe
+## Will delay execution of readiness/liveness probe until success
+## On fail will restart pod
+startupProbe:
+  null
+  # httpGet:
+  #   path: /
+  #   port: http
+
+terminationGracePeriodSeconds: 30
+lifecycle:
+  preStop:
+    exec:
+      ## sleep is hacky solution to allow traffic drain on termination
+      command:
+        - sh
+        - -c
+        - "sleep 15; kill 1"
+
+ports:
+  - name: tcp
+    containerPort: 1001
+
+command:
+- ko-app/k8s-ondemand-proxy
+- -upstream=$UPSTREAM
+- -namespace=$NAMESPACE
+- -resource-name=$RESOURCE_NAME
+- -listen=$LISTEN_ADDR
+- -idle-timeout=$IDLE_TIMEOUT
+- -replicas=$REPLICAS
+
+resources:
+  requests:
+    cpu: 0.010
+    memory: 32Mi
+
+## @param env dict of environment variables to set in container
+env:
+  GOMAXPROCS: "2"
+  UPSTREAM: 127.0.0.1:6000
+  RESOUCE_NAME: statefulset/app
+  LISTEN_ADDR: ":1001"
+  IDLE_TIMEOUT: 15m
+  REPLICAS: "1"
+
+  NAMESPACE:
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.namespace
+  POD_IP:
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+
+hostNetwork: false
+
+## Pod Disruption Budget configuration in distributed mode.
+## @param pdb.minAvaliable how many pods must be available to proceed with deployment
+## ref: https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+##
+pdb:
+  enabled: false
+  minAvailable: 50%
+
+minReadySeconds: 10
+
+dnsConfig: {}
+
+deployment:
+  annotations: {}
+  ## @param deployment.replicas will be ignored if hpa enabled
+  replicas: 1
+
+pod:
+  annotations: {}
+  labels: {}
+
+volumeMounts:
+  []
+  # - name: example-disk
+  #   mountPath: /usr/share/disk
+
+volumes:
+  []
+  # - name: example-disk
+  #   hostPath:
+  #     path: /usr/share/disk
+  #     type: Directory
+
+initContainers:
+  []
+  # - name: share
+  #   image: example:latest
+  #   imagePullPolicy: Always
+  #   command:
+  #     - "bash"
+  #     - "-exc"
+  #     - |
+  #       {
+  #         echo lol;
+  #       }
+  #   volumeMounts:
+  #     - mountPath: /data
+  #       name: disk
+
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - "{{ .Release.Name }}"
+
+tolerations:
+  - key: "{{ .Release.Name }}"
+    operator: Exists
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: "{{ .Release.Name }}"
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app: "{{ .Release.Name }}"
