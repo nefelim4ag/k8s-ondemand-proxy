@@ -5,7 +5,7 @@ metadata:
   name: {{ .Release.Namespace }}-{{ .Release.Name }}
 rules:
 - apiGroups: ["apps"]
-  resources: ["deployments", "replicasets", "statefulsets"]
+  resources: ["deployments", "deployments/scale", "replicasets", "replicasets/scale", "statefulsets", "statefulsets/scale"]
   verbs: ["get", "watch", "list", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
