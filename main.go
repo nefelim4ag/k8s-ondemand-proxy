@@ -13,17 +13,20 @@ import (
 
 	"log/slog"
 
+	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"nefelim4ag/k8s-ondemand-proxy/tcpserver"
+	"nefelim4ag/k8s-ondemand-proxy/pkg/tcpserver"
 )
 
 type globalState struct {
 	lastServe  atomic.Int64
 	readyPods  atomic.Int32
+	replicas   atomic.Int32
 	upsreamSrv *net.TCPAddr
 	namespace  string
 	group      string
@@ -85,19 +88,37 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 		slog.Error(err.Error())
 		return
 	}
+	defer clientConn.Close()
 
 	state.touch()
-	// Must be some sort of locking, or sync.Cond, but I too lazy.
+	// Must be some sort of locking, or sync.Cond, but I'm too lazy.
 	for state.readyPods.Load() == 0 {
+		state.touch()
 		time.Sleep(time.Second * 2)
 	}
 
-	serverConn, err := net.DialTCP("tcp", nil, state.upsreamSrv)
+	var serverConn *net.TCPConn
+	// Retry up to ~40s
+	for i := 1; i < 9; i++ {
+		state.touch()
+		serverConn, err = net.DialTCP("tcp", nil, state.upsreamSrv)
+		if err != nil {
+			netErr := err.(*net.OpError)
+			if netErr.Err.Error() == "connect: connection refused" {
+				// There must be some pod info logic to guess what happens and why...
+				// But we will just wait & retry
+				slog.Error(err.Error(), "temporary", "maybe", "retry", true, "count", i)
+				time.Sleep(time.Second * time.Duration(i))
+			} else {
+				return
+			}
+		}
+	}
+	// If retry doen't help - die
 	if err != nil {
-		slog.Error(err.Error())
-		clientConn.Close()
 		return
 	}
+
 	serverConn.SetKeepAlive(true)
 	slog.Info("Handle connection", "client", clientConn.RemoteAddr().String(), "server", serverConn.RemoteAddr().String())
 
@@ -106,38 +127,68 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 	state.pipe(serverConn, clientConn)
 }
 
-func (state *globalState) readyPodsUpdater() {
+func (state *globalState) statusWatcher() {
 	client := state.client
 	switch state.group {
 	case "statefulset", "sts":
 		statefulSetClient := client.AppsV1().StatefulSets(state.namespace)
-
-		for {
-			sts, err := statefulSetClient.Get(context.TODO(), state.name, metav1.GetOptions{})
-			if err != nil {
-				slog.Error(err.Error())
+		sts, err := statefulSetClient.Get(context.TODO(), state.name, metav1.GetOptions{})
+		if err != nil {
+			slog.Error(err.Error())
+			return
+		}
+		state.readyPods.Store(sts.Status.ReadyReplicas)
+		state.replicas.Store(sts.Status.Replicas)
+		listOptions := metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(metav1.ObjectNameField, sts.Name).String(),
+		}
+		watcher, err := statefulSetClient.Watch(context.TODO(), listOptions)
+		if err != nil {
+			slog.Error(err.Error())
+		}
+		wch := watcher.ResultChan()
+		defer watcher.Stop()
+		for event := range wch {
+			sts, ok := event.Object.(*v1.StatefulSet)
+			if !ok {
+				slog.Error("unexpected type in watch event")
+				return
 			}
+			state.replicas.Store(sts.Status.Replicas)
 			if sts.Status.ReadyReplicas != state.readyPods.Load() {
 				slog.Info("Scale event", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
 				state.readyPods.Store(sts.Status.ReadyReplicas)
 			}
-			time.Sleep(time.Second * 3)
 		}
-
 	case "deployment", "deploy":
 		deploymentClient := client.AppsV1().Deployments(state.namespace)
-
-		for {
-			deploy, err := deploymentClient.Get(context.TODO(), state.name, metav1.GetOptions{})
-			if err != nil {
-				slog.Error(err.Error())
+		deploy, err := deploymentClient.Get(context.TODO(), state.name, metav1.GetOptions{})
+		if err != nil {
+			slog.Error(err.Error())
+			return
+		}
+		state.readyPods.Store(deploy.Status.ReadyReplicas)
+		state.replicas.Store(deploy.Status.Replicas)
+		listOptions := metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(metav1.ObjectNameField, deploy.Name).String(),
+		}
+		watcher, err := deploymentClient.Watch(context.TODO(), listOptions)
+		if err != nil {
+			slog.Error(err.Error())
+		}
+		wch := watcher.ResultChan()
+		defer watcher.Stop()
+		for event := range wch {
+			deploy, ok := event.Object.(*v1.Deployment)
+			if !ok {
+				slog.Error("unexpected type in watch event")
 				return
 			}
+			state.replicas.Store(deploy.Status.Replicas)
 			if deploy.Status.ReadyReplicas != state.readyPods.Load() {
 				slog.Info("Scale event", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
 				state.readyPods.Store(deploy.Status.ReadyReplicas)
 			}
-			time.Sleep(time.Second * 3)
 		}
 	default:
 		slog.Error("Api group not supported", "api", state.group)
@@ -145,7 +196,7 @@ func (state *globalState) readyPodsUpdater() {
 }
 
 func (state *globalState) podsScaler(timeout time.Duration, replicas int32) {
-	for {
+	for range time.NewTicker(time.Second).C {
 		now := time.Now().Unix()
 		timeoutSec := int64(timeout.Seconds())
 		lastAccess := state.lastServe.Load()
@@ -154,12 +205,16 @@ func (state *globalState) podsScaler(timeout time.Duration, replicas int32) {
 		} else {
 			state.updateScale(replicas)
 		}
-		time.Sleep(time.Second)
 	}
 }
 
 func (state *globalState) updateScale(replicas int32) {
 	client := state.client
+	if state.replicas.Load() == replicas {
+		// NoOp, wait for pod start
+		return
+	}
+
 	slog.Info("Trigger scale", "name", state.name, "replicas", replicas, "group", state.group, "namespace", state.namespace)
 	switch state.group {
 	case "statefulset", "sts":
@@ -205,7 +260,7 @@ func main() {
 	flag.StringVar(&rawLocalServerAddr, "listen", "", "Local address listen to like :2375")
 	flag.StringVar(&namespace, "namespace", "", "Kubernetes namespace to work with")
 	flag.StringVar(&resourceName, "resource-name", "", "Kubernetes resource like deployment/app")
-	idleTimeout := flag.Duration("idle-timeout", time.Minute * 15, "Go Duration on last traffic activity before shutdown")
+	idleTimeout := flag.Duration("idle-timeout", time.Minute*15, "Go Duration on last traffic activity before shutdown")
 	replicas := flag.Int64("replicas", 1, "replica count on traffic & on cold startup")
 	flag.Parse()
 
@@ -238,7 +293,7 @@ func main() {
 	state.name = resourceArgs[1]
 	state.touch()
 	go state.podsScaler(*idleTimeout, int32(*replicas))
-	go state.readyPodsUpdater()
+	go state.statusWatcher()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
