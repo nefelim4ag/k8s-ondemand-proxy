@@ -1,6 +1,8 @@
 # k8s-ondemand-proxy
 Simple TCP proxy app that will scale from zero Deployment/StatefulSet  in case of external requests and scale down when no traffic
 
+The basic idea from knative scaling to zero.
+
 # How it works
 Very similar to Knative but dead simple
 ```

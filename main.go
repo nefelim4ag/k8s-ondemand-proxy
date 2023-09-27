@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -27,7 +28,7 @@ type globalState struct {
 	lastServe  atomic.Int64
 	readyPods  atomic.Int32
 	replicas   atomic.Int32
-	upsreamSrv *net.TCPAddr
+	inOutPort  map[int]*net.TCPAddr
 	namespace  string
 	group      string
 	name       string
@@ -83,12 +84,29 @@ func (state *globalState) pipe(src *net.TCPConn, dst *net.TCPConn) {
 	}
 }
 
+func addrToPort (address string) (int, error) {
+	srvSplit := strings.Split(address, ":")
+	portString := srvSplit[len(srvSplit) - 1]
+	localPort, err := strconv.ParseInt(portString, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int(localPort), nil
+}
+
 func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) {
 	if err != nil {
 		slog.Error(err.Error())
 		return
 	}
 	defer clientConn.Close()
+
+	localPort, err := addrToPort(clientConn.LocalAddr().String())
+	if err != nil {
+		slog.Error(err.Error())
+		return
+	}
+	upsreamSrv := state.inOutPort[int(localPort)]
 
 	state.touch()
 	// Must be some sort of locking, or sync.Cond, but I'm too lazy.
@@ -101,7 +119,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 	// Retry up to ~40s
 	for i := 1; i < 9; i++ {
 		state.touch()
-		serverConn, err = net.DialTCP("tcp", nil, state.upsreamSrv)
+		serverConn, err = net.DialTCP("tcp", nil, upsreamSrv)
 		if err != nil {
 			netErr := err.(*net.OpError)
 			if netErr.Err.Error() == "connect: connection refused" {
@@ -114,7 +132,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 			}
 		}
 	}
-	// If retry doen't help - die
+	// If retry doesn't help - die
 	if err != nil {
 		return
 	}
@@ -278,7 +296,16 @@ func main() {
 		client:    client,
 		namespace: namespace,
 	}
-	state.upsreamSrv, err = net.ResolveTCPAddr("tcp", rawUpstreamServerAddr)
+	state.inOutPort = make(map[int]*net.TCPAddr, 1)
+
+	localPort, err := addrToPort(rawLocalServerAddr)
+	if err != nil {
+		slog.Error(err.Error())
+		return
+	}
+
+	upsreamSrv, err := net.ResolveTCPAddr("tcp", rawUpstreamServerAddr)
+	state.inOutPort[int(localPort)] = upsreamSrv
 	if err != nil {
 		slog.Error("failed to resolve address", rawUpstreamServerAddr, err.Error())
 		return
