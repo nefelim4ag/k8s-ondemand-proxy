@@ -146,7 +146,22 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 }
 
 func (state *globalState) statusWatcher() {
+	for {
+		// Infinite retry
+		state.watch()
+		time.Sleep(time.Second)
+	}
+}
+
+func (state *globalState) watch() {
 	client := state.client
+	timeout := int64(600)
+
+	listOptions := metav1.ListOptions{
+		FieldSelector:  fields.OneTermEqualSelector(metav1.ObjectNameField, state.name).String(),
+		TimeoutSeconds: &timeout,
+	}
+
 	switch state.group {
 	case "statefulset", "sts":
 		statefulSetClient := client.AppsV1().StatefulSets(state.namespace)
@@ -157,25 +172,33 @@ func (state *globalState) statusWatcher() {
 		}
 		state.readyPods.Store(sts.Status.ReadyReplicas)
 		state.replicas.Store(sts.Status.Replicas)
-		listOptions := metav1.ListOptions{
-			FieldSelector: fields.OneTermEqualSelector(metav1.ObjectNameField, sts.Name).String(),
-		}
+
 		watcher, err := statefulSetClient.Watch(context.TODO(), listOptions)
 		if err != nil {
 			slog.Error(err.Error())
 		}
 		wch := watcher.ResultChan()
 		defer watcher.Stop()
-		for event := range wch {
-			sts, ok := event.Object.(*v1.StatefulSet)
-			if !ok {
-				slog.Error("unexpected type in watch event")
+		for {
+			select {
+			case event, ok := <-wch:
+				if !ok {
+					// Channel closed - restart
+					return
+				}
+				sts, ok := event.Object.(*v1.StatefulSet)
+				if !ok {
+					slog.Error("unexpected type in watch event")
+					return
+				}
+				state.replicas.Store(sts.Status.Replicas)
+				if sts.Status.ReadyReplicas != state.readyPods.Load() {
+					slog.Info("Scale event", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
+					state.readyPods.Store(sts.Status.ReadyReplicas)
+				}
+			case <-time.After(11 * time.Minute):
+				// deal with the issue where we get no events
 				return
-			}
-			state.replicas.Store(sts.Status.Replicas)
-			if sts.Status.ReadyReplicas != state.readyPods.Load() {
-				slog.Info("Scale event", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
-				state.readyPods.Store(sts.Status.ReadyReplicas)
 			}
 		}
 	case "deployment", "deploy":
@@ -187,25 +210,33 @@ func (state *globalState) statusWatcher() {
 		}
 		state.readyPods.Store(deploy.Status.ReadyReplicas)
 		state.replicas.Store(deploy.Status.Replicas)
-		listOptions := metav1.ListOptions{
-			FieldSelector: fields.OneTermEqualSelector(metav1.ObjectNameField, deploy.Name).String(),
-		}
+
 		watcher, err := deploymentClient.Watch(context.TODO(), listOptions)
 		if err != nil {
 			slog.Error(err.Error())
 		}
 		wch := watcher.ResultChan()
 		defer watcher.Stop()
-		for event := range wch {
-			deploy, ok := event.Object.(*v1.Deployment)
-			if !ok {
-				slog.Error("unexpected type in watch event")
+		for {
+			select {
+			case event, ok := <-wch:
+				if !ok {
+					// Channel closed - restart
+					return
+				}
+				deploy, ok := event.Object.(*v1.Deployment)
+				if !ok {
+					slog.Error("unexpected type in watch event")
+					return
+				}
+				state.replicas.Store(deploy.Status.Replicas)
+				if deploy.Status.ReadyReplicas != state.readyPods.Load() {
+					slog.Info("Scale event", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
+					state.readyPods.Store(deploy.Status.ReadyReplicas)
+				}
+			case <-time.After(11 * time.Minute):
+				// deal with the issue where we get no events
 				return
-			}
-			state.replicas.Store(deploy.Status.Replicas)
-			if deploy.Status.ReadyReplicas != state.readyPods.Load() {
-				slog.Info("Scale event", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
-				state.readyPods.Store(deploy.Status.ReadyReplicas)
 			}
 		}
 	default:

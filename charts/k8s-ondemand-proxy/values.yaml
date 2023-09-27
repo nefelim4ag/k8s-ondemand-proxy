@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/nefelim4ag/k8s-ondemand-proxy
-  tag: latest
+  tag: 0.0.1
   pullPolicy: IfNotPresent
   imagePullSecrets: []
 
@@ -41,6 +41,50 @@ service:
       port: 1001
       targetPort: tcp
 
+ports:
+  - name: tcp
+    containerPort: 1001
+
+command:
+- ko-app/k8s-ondemand-proxy
+- -config=/etc/config/config.yaml
+
+resources:
+  requests:
+    cpu: 0.005
+    memory: 16Mi
+
+## @param env dict of environment variables to set in container
+env:
+  GOMAXPROCS: "2"
+  NAMESPACE:
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.namespace
+  POD_IP:
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+
+config:
+  namespace: "{{ .Release.Namespace }}"
+  replicas: 1
+  idle-timeout: 15m
+  resource: statefulset/app
+  proxy:
+  - local: ":1001"
+    remote: "127.0.0.1:1001"
+
+hostNetwork: false
+
+## Pod Disruption Budget configuration in distributed mode.
+## @param pdb.minAvaliable how many pods must be available to proceed with deployment
+## ref: https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+##
+pdb:
+  enabled: false
+  minAvailable: 50%
+
 ## @param livenessProbe
 ## Will restart pod on liveness fail
 livenessProbe:
@@ -76,52 +120,6 @@ lifecycle:
         - -c
         - "sleep 15; kill 1"
 
-ports:
-  - name: tcp
-    containerPort: 1001
-
-command:
-- ko-app/k8s-ondemand-proxy
-- -upstream=$(UPSTREAM)
-- -namespace=$(NAMESPACE)
-- -resource-name=$(RESOURCE_NAME)
-- -listen=$(LISTEN_ADDR)
-- -idle-timeout=$(IDLE_TIMEOUT)
-- -replicas=$(REPLICAS)
-
-resources:
-  requests:
-    cpu: 0.010
-    memory: 32Mi
-
-## @param env dict of environment variables to set in container
-env:
-  GOMAXPROCS: "2"
-  UPSTREAM: 127.0.0.1:6000
-  RESOURCE_NAME: statefulset/app
-  LISTEN_ADDR: ":1001"
-  IDLE_TIMEOUT: 15m
-  REPLICAS: "1"
-
-  NAMESPACE:
-    valueFrom:
-      fieldRef:
-        fieldPath: metadata.namespace
-  POD_IP:
-    valueFrom:
-      fieldRef:
-        fieldPath: status.podIP
-
-hostNetwork: false
-
-## Pod Disruption Budget configuration in distributed mode.
-## @param pdb.minAvaliable how many pods must be available to proceed with deployment
-## ref: https://kubernetes.io/docs/tasks/run-application/configure-pdb/
-##
-pdb:
-  enabled: false
-  minAvailable: 50%
-
 minReadySeconds: 10
 
 dnsConfig: {}
@@ -136,16 +134,13 @@ pod:
   labels: {}
 
 volumeMounts:
-  []
-  # - name: example-disk
-  #   mountPath: /usr/share/disk
-
+- name: config
+  mountPath: /etc/config/
 volumes:
-  []
-  # - name: example-disk
-  #   hostPath:
-  #     path: /usr/share/disk
-  #     type: Directory
+- name: config
+  configMap:
+    name: "{{ $.Release.Name }}"
+    defaultMode: 0644
 
 initContainers:
   []
