@@ -14,6 +14,7 @@ import (
 
 	"log/slog"
 
+	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -24,16 +25,31 @@ import (
 	"nefelim4ag/k8s-ondemand-proxy/pkg/tcpserver"
 )
 
+type config struct {
+	Namespace   string        `yaml:"namespace"`
+	Replicas    int           `yaml:"replicas"`
+	Resource    string        `yaml:"resource"`
+	IdleTimeout time.Duration `yaml:"idle-timeout"`
+	Proxy       []proxyPair   `yaml:"proxy"`
+}
+
+type proxyPair struct {
+	Local  string `yaml:"local"`
+	Remote string `yaml:"remote"`
+}
+
 type globalState struct {
-	lastServe  atomic.Int64
-	readyPods  atomic.Int32
-	replicas   atomic.Int32
-	inOutPort  map[int]*net.TCPAddr
-	namespace  string
-	group      string
-	name       string
+	lastServe atomic.Int64
+	readyPods atomic.Int32
+	replicas  atomic.Int32
+	inOutPort map[int]*net.TCPAddr
+	namespace string
+	group     string
+	name      string
 
 	client *clientset.Clientset
+
+	servers []tcpserver.Server
 }
 
 func (state *globalState) touch() {
@@ -84,9 +100,9 @@ func (state *globalState) pipe(src *net.TCPConn, dst *net.TCPConn) {
 	}
 }
 
-func addrToPort (address string) (int, error) {
+func addrToPort(address string) (int, error) {
 	srvSplit := strings.Split(address, ":")
-	portString := srvSplit[len(srvSplit) - 1]
+	portString := srvSplit[len(srvSplit)-1]
 	localPort, err := strconv.ParseInt(portString, 10, 32)
 	if err != nil {
 		return 0, err
@@ -299,71 +315,92 @@ func (state *globalState) updateScale(replicas int32) {
 
 func main() {
 	var kubeconfig string
-	var rawUpstreamServerAddr string
-	var rawLocalServerAddr string
-	var namespace string
-	var resourceName string
+	var configPath string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
-	flag.StringVar(&rawUpstreamServerAddr, "upstream", "", "Remote server address like dind.ci.svc.cluster.local:2375")
-	flag.StringVar(&rawLocalServerAddr, "listen", "", "Local address listen to like :2375")
-	flag.StringVar(&namespace, "namespace", "", "Kubernetes namespace to work with")
-	flag.StringVar(&resourceName, "resource-name", "", "Kubernetes resource like deployment/app")
-	idleTimeout := flag.Duration("idle-timeout", time.Minute*15, "Go Duration on last traffic activity before shutdown")
-	replicas := flag.Int64("replicas", 1, "replica count on traffic & on cold startup")
+	flag.StringVar(&configPath, "config", "", "Yaml config path")
 	flag.Parse()
 
 	programLevel := new(slog.LevelVar)
 	logger := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel})
 	slog.SetDefault(slog.New(logger))
 
-	config, err := buildConfig(kubeconfig)
+	f, err := os.ReadFile(configPath)
 	if err != nil {
 		slog.Error(err.Error())
+		os.Exit(1)
 	}
-	client := clientset.NewForConfigOrDie(config)
+
+	c := config{}
+	if err := yaml.Unmarshal(f, &c); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	_Config, err := buildConfig(kubeconfig)
+	if err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	if len(c.Proxy) == 0 {
+		slog.Error("Can't empty proxy section in config")
+		os.Exit(1)
+	}
+
+	client := clientset.NewForConfigOrDie(_Config)
 
 	state := globalState{
 		client:    client,
-		namespace: namespace,
+		namespace: c.Namespace,
 	}
-	state.inOutPort = make(map[int]*net.TCPAddr, 1)
+	state.inOutPort = make(map[int]*net.TCPAddr, len(c.Proxy))
 
-	localPort, err := addrToPort(rawLocalServerAddr)
-	if err != nil {
-		slog.Error(err.Error())
-		return
-	}
-
-	upsreamSrv, err := net.ResolveTCPAddr("tcp", rawUpstreamServerAddr)
-	state.inOutPort[int(localPort)] = upsreamSrv
-	if err != nil {
-		slog.Error("failed to resolve address", rawUpstreamServerAddr, err.Error())
-		return
-	}
-
-	resourceArgs := strings.Split(resourceName, "/")
+	resourceArgs := strings.Split(c.Resource, "/")
 	if len(resourceArgs) != 2 {
 		slog.Error("Wrong resource name, must be statefulset/app or deployment/app", "parsed", resourceArgs)
 		return
 	}
+
 	state.group = resourceArgs[0]
 	state.name = resourceArgs[1]
+
 	state.touch()
-	go state.podsScaler(*idleTimeout, int32(*replicas))
+	go state.podsScaler(c.IdleTimeout, int32(c.Replicas))
 	go state.statusWatcher()
+
+	state.servers = make([]tcpserver.Server, len(c.Proxy))
+
+	for k, p := range c.Proxy {
+		addr, err := net.ResolveTCPAddr("tcp", p.Local)
+		if err != nil {
+			slog.Error("failed to resolve address", "address", p.Local, "error", err.Error())
+			os.Exit(1)
+		}
+
+		localPort := addr.Port
+
+		upsreamSrv, err := net.ResolveTCPAddr("tcp", p.Remote)
+		state.inOutPort[int(localPort)] = upsreamSrv
+		if err != nil {
+			slog.Error("failed to resolve address", p.Remote, err.Error())
+			os.Exit(1)
+		}
+
+		err = state.servers[k].ListenAndServe(addr, state.connectionHandler)
+		if err != nil {
+			slog.Error(err.Error())
+			os.Exit(1)
+		}
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	srvInstance := tcpserver.Server{}
-	err = srvInstance.ListenAndServe(rawLocalServerAddr, state.connectionHandler)
-	if err != nil {
-		slog.Error(err.Error())
-	}
-
 	<-sigChan
 	slog.Info("Shutting down server...")
-	srvInstance.Stop()
+	for k := range state.servers {
+		state.servers[k].Stop()
+	}
 	slog.Info("Server stopped.")
 }

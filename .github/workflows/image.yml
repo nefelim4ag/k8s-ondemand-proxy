@@ -22,4 +22,4 @@ jobs:
       - uses: ko-build/setup-ko@v0.6
       - run: |
           tag=$(echo ${{ github.sha }} | cut -c-8)
-          ko build --bare --platform=linux/arm64,linux/amd64 --sbom=none -t latest -t ${tag}
+          ko build --bare --platform=linux/arm64,linux/amd64 --sbom=none -t latest -t 0.0.1 -t ${tag}

@@ -26,17 +26,13 @@ type (
 	}
 )
 
-func (s *Server) ListenAndServe(address string, handler ConnectionHandler) error {
-	addr, err := net.ResolveTCPAddr("tcp", address)
-	if err != nil {
-		return fmt.Errorf("failed to resolve address %s: %w", address, err)
-	}
-
+func (s *Server) ListenAndServe(addr *net.TCPAddr, handler ConnectionHandler) error {
+	var err error
 	s.listener, err = net.ListenTCP("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on address %s: %w", address, err)
+		return fmt.Errorf("failed to listen on address %s: %w", addr, err)
 	}
-	slog.Info("Listening", "address", address)
+	slog.Info("Listening", "address", addr)
 
 	s.handler = handler
 	s.shutdown = make(chan struct{})
@@ -80,7 +76,7 @@ func (s *Server) Stop() error {
 	select {
 	case <-done:
 		return nil
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		slog.Warn("Timed out waiting for connections to finish.")
 		return nil
 	}
