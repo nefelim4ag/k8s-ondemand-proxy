@@ -216,7 +216,7 @@ func (state *globalState) watch() {
 					return
 				}
 				if sts.Status.Replicas != state.replicas.Load() {
-					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", sts.Status.Replicas)
 					state.replicas.Store(sts.Status.Replicas)
 				}
 				if sts.Status.ReadyReplicas != state.readyPods.Load() {
@@ -257,7 +257,7 @@ func (state *globalState) watch() {
 					return
 				}
 				if deploy.Status.Replicas != state.replicas.Load() {
-					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", deploy.Status.Replicas)
 					state.replicas.Store(deploy.Status.Replicas)
 				}
 				if deploy.Status.ReadyReplicas != state.readyPods.Load() {
