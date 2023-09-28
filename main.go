@@ -42,7 +42,7 @@ type globalState struct {
 	lastServe atomic.Int64
 	readyPods atomic.Int32
 	replicas  atomic.Int32
-	inOutPort map[int]*net.TCPAddr
+	inOutPort map[int]string
 	namespace string
 	group     string
 	name      string
@@ -122,7 +122,7 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 		slog.Error(err.Error())
 		return
 	}
-	upsreamSrv := state.inOutPort[int(localPort)]
+	upstreamRawAddr := state.inOutPort[int(localPort)]
 
 	state.touch()
 	// Must be some sort of locking, or sync.Cond, but I'm too lazy.
@@ -132,24 +132,32 @@ func (state *globalState) connectionHandler(clientConn *net.TCPConn, err error) 
 	}
 
 	var serverConn *net.TCPConn
-	// Retry up to ~40s
-	for i := 1; i < 9; i++ {
+	// Retry up to ~60s
+	deadline := time.Now().Add(time.Second * 60)
+	for t := time.Now(); t.Before(deadline); t = time.Now() {
 		state.touch()
-		serverConn, err = net.DialTCP("tcp", nil, upsreamSrv)
-		if err != nil {
-			netErr := err.(*net.OpError)
-			if netErr.Err.Error() == "connect: connection refused" {
-				// There must be some pod info logic to guess what happens and why...
-				// But we will just wait & retry
-				slog.Error(err.Error(), "temporary", "maybe", "retry", true, "count", i)
-				time.Sleep(time.Second * time.Duration(i))
-			} else {
-				return
-			}
+		// DNS can & will change sometimes, so resolve it each time
+		conn, err := net.DialTimeout("tcp", upstreamRawAddr, time.Second * time.Duration(10))
+		if err == nil {
+			serverConn = conn.(*net.TCPConn)
+			break
+		}
+
+		netErr := err.(*net.OpError)
+		switch netErr.Err.Error() {
+		case "connect: connection refused":
+			slog.Error(err.Error(), "temporary", "maybe", "retry", true, "abortInSec", deadline.Unix() - time.Now().Unix())
+			time.Sleep(time.Second * time.Duration(5))
+		case "i/o timeout":
+			slog.Error(err.Error(), "temporary", "maybe", "retry", true, "abortInSec", deadline.Unix() - time.Now().Unix())
+		default:
+			slog.Error(err.Error())
+			return
 		}
 	}
-	// If retry doesn't help - die
-	if err != nil {
+
+	// If retry doesn't help - abort client
+	if err != nil || serverConn == nil {
 		return
 	}
 
@@ -207,9 +215,12 @@ func (state *globalState) watch() {
 					slog.Error("unexpected type in watch event")
 					return
 				}
-				state.replicas.Store(sts.Status.Replicas)
+				if sts.Status.Replicas != state.replicas.Load() {
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
+					state.replicas.Store(sts.Status.Replicas)
+				}
 				if sts.Status.ReadyReplicas != state.readyPods.Load() {
-					slog.Info("Scale event", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
+					slog.Info("Scale event - ready", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
 					state.readyPods.Store(sts.Status.ReadyReplicas)
 				}
 			case <-time.After(11 * time.Minute):
@@ -245,9 +256,12 @@ func (state *globalState) watch() {
 					slog.Error("unexpected type in watch event")
 					return
 				}
-				state.replicas.Store(deploy.Status.Replicas)
+				if deploy.Status.Replicas != state.replicas.Load() {
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
+					state.replicas.Store(deploy.Status.Replicas)
+				}
 				if deploy.Status.ReadyReplicas != state.readyPods.Load() {
-					slog.Info("Scale event", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
+					slog.Info("Scale event - ready", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
 					state.readyPods.Store(deploy.Status.ReadyReplicas)
 				}
 			case <-time.After(11 * time.Minute):
@@ -280,7 +294,7 @@ func (state *globalState) updateScale(replicas int32) {
 		return
 	}
 
-	slog.Info("Trigger scale", "name", state.name, "replicas", replicas, "group", state.group, "namespace", state.namespace)
+	slog.Info("Trigger scale - target", "name", state.name, "replicas", replicas, "group", state.group, "namespace", state.namespace)
 	switch state.group {
 	case "statefulset", "sts":
 		statefulSetClient := client.AppsV1().StatefulSets(state.namespace)
@@ -322,7 +336,13 @@ func main() {
 	flag.Parse()
 
 	programLevel := new(slog.LevelVar)
-	logger := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel})
+	replace := func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == "msg" {
+			a.Key = "message"
+		}
+		return a
+	}
+	logger := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel, ReplaceAttr: replace})
 	slog.SetDefault(slog.New(logger))
 
 	f, err := os.ReadFile(configPath)
@@ -354,7 +374,7 @@ func main() {
 		client:    client,
 		namespace: c.Namespace,
 	}
-	state.inOutPort = make(map[int]*net.TCPAddr, len(c.Proxy))
+	state.inOutPort = make(map[int]string, len(c.Proxy))
 
 	resourceArgs := strings.Split(c.Resource, "/")
 	if len(resourceArgs) != 2 {
@@ -380,12 +400,12 @@ func main() {
 
 		localPort := addr.Port
 
-		upsreamSrv, err := net.ResolveTCPAddr("tcp", p.Remote)
-		state.inOutPort[int(localPort)] = upsreamSrv
+		_, err = net.ResolveTCPAddr("tcp", p.Remote)
 		if err != nil {
 			slog.Error("failed to resolve address", p.Remote, err.Error())
 			os.Exit(1)
 		}
+		state.inOutPort[int(localPort)] = p.Remote
 
 		err = state.servers[k].ListenAndServe(addr, state.connectionHandler)
 		if err != nil {
