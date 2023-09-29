@@ -195,7 +195,7 @@ func (state *globalState) watch() {
 			return
 		}
 		state.readyPods.Store(sts.Status.ReadyReplicas)
-		state.replicas.Store(sts.Status.Replicas)
+		state.replicas.Store(*sts.Spec.Replicas)
 
 		watcher, err := statefulSetClient.Watch(context.TODO(), listOptions)
 		if err != nil {
@@ -215,9 +215,9 @@ func (state *globalState) watch() {
 					slog.Error("unexpected type in watch event")
 					return
 				}
-				if sts.Status.Replicas != state.replicas.Load() {
-					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", sts.Status.Replicas)
-					state.replicas.Store(sts.Status.Replicas)
+				if *sts.Spec.Replicas != state.replicas.Load() {
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", *sts.Spec.Replicas)
+					state.replicas.Store(*sts.Spec.Replicas)
 				}
 				if sts.Status.ReadyReplicas != state.readyPods.Load() {
 					slog.Info("Scale event - ready", "old", state.readyPods.Load(), "new", sts.Status.ReadyReplicas)
@@ -235,7 +235,7 @@ func (state *globalState) watch() {
 			slog.Error(err.Error())
 			return
 		}
-		state.readyPods.Store(deploy.Status.ReadyReplicas)
+		state.readyPods.Store(*deploy.Spec.Replicas)
 		state.replicas.Store(deploy.Status.Replicas)
 
 		watcher, err := deploymentClient.Watch(context.TODO(), listOptions)
@@ -256,9 +256,9 @@ func (state *globalState) watch() {
 					slog.Error("unexpected type in watch event")
 					return
 				}
-				if deploy.Status.Replicas != state.replicas.Load() {
-					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", deploy.Status.Replicas)
-					state.replicas.Store(deploy.Status.Replicas)
+				if *deploy.Spec.Replicas != state.replicas.Load() {
+					slog.Info("Scale event - target", "old", state.readyPods.Load(), "new", *deploy.Spec.Replicas)
+					state.replicas.Store(*deploy.Spec.Replicas)
 				}
 				if deploy.Status.ReadyReplicas != state.readyPods.Load() {
 					slog.Info("Scale event - ready", "old", state.readyPods.Load(), "new", deploy.Status.ReadyReplicas)
