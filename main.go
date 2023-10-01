@@ -345,6 +345,10 @@ func main() {
 	logger := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel, ReplaceAttr: replace})
 	slog.SetDefault(slog.New(logger))
 
+	if configPath == "" {
+		configPath = os.Getenv("CONFIGPATH")
+	}
+
 	f, err := os.ReadFile(configPath)
 	if err != nil {
 		slog.Error(err.Error())

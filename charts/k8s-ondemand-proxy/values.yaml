@@ -45,9 +45,7 @@ ports:
   - name: tcp
     containerPort: 1001
 
-command:
-- ko-app/k8s-ondemand-proxy
-- -config=/etc/config/config.yaml
+command: []
 
 resources:
   requests:
@@ -57,6 +55,7 @@ resources:
 ## @param env dict of environment variables to set in container
 env:
   GOMAXPROCS: "2"
+  CONFIGPATH: /etc/config/config.yaml
   NAMESPACE:
     valueFrom:
       fieldRef:
@@ -73,7 +72,7 @@ config:
   resource: statefulset/app
   proxy:
   - local: ":1001"
-    remote: "127.0.0.1:1001"
+    remote: "app.namespace.svc.cluster.local:1001"
 
 hostNetwork: false
 

@@ -4,4 +4,4 @@ resource: statefulset/dind
 idle-timeout: 15m
 proxy:
 - local: ":2375"
-  remote: 127.0.0.1:6000
+  remote: dind.ci.svc.cluster.local:2375
