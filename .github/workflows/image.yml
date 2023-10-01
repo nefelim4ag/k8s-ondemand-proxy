@@ -2,7 +2,8 @@ name: Build image
 
 on:
   push:
-    branches: ['main']
+    tags:
+      - '*'
 
 jobs:
   publish:
@@ -21,5 +22,6 @@ jobs:
 
       - uses: ko-build/setup-ko@v0.6
       - run: |
-          tag=$(echo ${{ github.sha }} | cut -c-8)
-          ko build --bare --platform=linux/arm64,linux/amd64 --sbom=none -t latest -t 0.0.1 -t ${tag}
+          short_hash=$(echo ${{ github.sha }} | cut -c-8)
+          tag=$(echo ${{ github.ref }} | cut -c11-)  # get tag name without tags/refs/ prefix.
+          ko build --bare --platform=linux/arm64,linux/amd64 --sbom=none -t latest -t ${short_hash} -t ${tag}
